@@ -71,7 +71,15 @@ RUN apt-get update \
     zip \
     openssh-client \
     rsync \
-  && rm -rf /var/lib/apt/lists/*
+    tmux \
+    locales \
+    fontconfig \
+    fonts-powerline \
+  && rm -rf /var/lib/apt/lists/* \
+  && locale-gen en_US.UTF-8
+
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
 
 # Install Node.js 22 (code-server base may have older version)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
@@ -107,6 +115,108 @@ RUN printf '%s\n' '#!/usr/bin/env bash' 'exec node /openclaw/dist/entry.js "$@"'
 RUN mkdir -p /data/.openclaw /data/workspace /data/.config \
   && chmod -R 777 /data
 
+# Create mobile-friendly tmux configuration
+RUN cat > /etc/tmux.conf << 'TMUXCONF'
+# Mobile-friendly tmux configuration
+
+# Use C-a as prefix (easier on mobile keyboards)
+unbind C-b
+set -g prefix C-a
+bind C-a send-prefix
+
+# Enable mouse support (essential for mobile/touch)
+set -g mouse on
+
+# Larger scrollback buffer
+set -g history-limit 50000
+
+# Start windows and panes at 1, not 0 (easier to reach on mobile)
+set -g base-index 1
+setw -g pane-base-index 1
+
+# Renumber windows when one is closed
+set -g renumber-windows on
+
+# Faster key repetition
+set -s escape-time 0
+
+# Increase repeat time for easier resizing on mobile
+set -g repeat-time 1000
+
+# Easy window splitting with more memorable keys
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+unbind '"'
+unbind %
+
+# Easy pane navigation (vim-style)
+bind h select-pane -L
+bind j select-pane -D
+bind k select-pane -U
+bind l select-pane -R
+
+# Easy pane resizing with arrow keys (hold prefix)
+bind -r Left resize-pane -L 5
+bind -r Down resize-pane -D 5
+bind -r Up resize-pane -U 5
+bind -r Right resize-pane -R 5
+
+# Quick reload config
+bind r source-file /etc/tmux.conf \; display "Config reloaded!"
+
+# Better colors
+set -g default-terminal "screen-256color"
+set -ga terminal-overrides ",*256col*:Tc"
+
+# Status bar configuration (mobile-friendly: minimal, readable)
+set -g status-position bottom
+set -g status-style 'bg=#1e1e2e fg=#cdd6f4'
+set -g status-left-length 20
+set -g status-right-length 50
+set -g status-left '#[fg=#1e1e2e,bg=#89b4fa,bold] #S #[bg=#1e1e2e] '
+set -g status-right '#[fg=#a6adc8] %H:%M '
+
+# Window status
+setw -g window-status-format ' #I:#W '
+setw -g window-status-current-format '#[fg=#1e1e2e,bg=#a6e3a1,bold] #I:#W '
+
+# Pane borders
+set -g pane-border-style 'fg=#313244'
+set -g pane-active-border-style 'fg=#89b4fa'
+
+# Message style
+set -g message-style 'fg=#1e1e2e bg=#f9e2af bold'
+
+# Activity monitoring
+setw -g monitor-activity on
+set -g visual-activity off
+
+# Easy copy mode (press prefix + [ to enter, q to exit)
+setw -g mode-keys vi
+bind -T copy-mode-vi v send-keys -X begin-selection
+bind -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+
+# Double-tap prefix to switch to last window (useful on mobile)
+bind C-a last-window
+
+# Easy session management
+bind S choose-session
+bind N new-session
+
+# Kill pane/window shortcuts
+bind x kill-pane
+bind X kill-window
+TMUXCONF
+
+# Install code-server extensions (Terminus for better terminal)
+USER coder
+RUN code-server --install-extension Tyriar.sort-lines \
+  && code-server --install-extension esbenp.prettier-vscode \
+  && code-server --install-extension dbaeumer.vscode-eslint \
+  || true
+
+USER root
+
 # Environment variables for openclaw
 ENV OPENCLAW_STATE_DIR=/data/.openclaw
 ENV OPENCLAW_WORKSPACE_DIR=/data/workspace
@@ -122,7 +232,7 @@ RUN cat > /usr/local/bin/entrypoint.sh << 'EOF'
 set -e
 
 # Ensure data directories exist
-mkdir -p /data/.openclaw /data/workspace /data/.config/code-server
+mkdir -p /data/.openclaw /data/workspace /data/.config/code-server /data/.tmux
 
 # Link code-server config to persistent storage
 if [ ! -L /home/coder/.config ]; then
@@ -136,6 +246,12 @@ if [ ! -L /home/coder/workspace ]; then
   ln -sf /data/workspace /home/coder/workspace
 fi
 
+# Setup tmux config (copy default if user hasn't customized)
+if [ ! -f /data/.tmux/.tmux.conf ]; then
+  cp /etc/tmux.conf /data/.tmux/.tmux.conf
+fi
+ln -sf /data/.tmux/.tmux.conf /home/coder/.tmux.conf 2>/dev/null || true
+
 # Generate code-server config if not exists
 if [ ! -f /data/.config/code-server/config.yaml ]; then
   mkdir -p /data/.config/code-server
@@ -145,6 +261,44 @@ auth: ${CS_AUTH:-password}
 password: ${PASSWORD:-changeme}
 cert: false
 YAML
+fi
+
+# Generate VS Code settings for mobile-friendly terminal
+mkdir -p /data/.config/Code/User
+if [ ! -f /data/.config/Code/User/settings.json ]; then
+  cat > /data/.config/Code/User/settings.json << 'SETTINGS'
+{
+  "terminal.integrated.fontSize": 14,
+  "terminal.integrated.lineHeight": 1.2,
+  "terminal.integrated.cursorStyle": "block",
+  "terminal.integrated.cursorBlinking": true,
+  "terminal.integrated.scrollback": 10000,
+  "terminal.integrated.enablePersistentSessions": true,
+  "terminal.integrated.defaultProfile.linux": "tmux",
+  "terminal.integrated.profiles.linux": {
+    "bash": {
+      "path": "/bin/bash",
+      "icon": "terminal-bash"
+    },
+    "tmux": {
+      "path": "/usr/bin/tmux",
+      "args": ["new-session", "-A", "-s", "main"],
+      "icon": "terminal-tmux"
+    }
+  },
+  "editor.fontSize": 14,
+  "editor.lineHeight": 1.5,
+  "editor.wordWrap": "on",
+  "editor.minimap.enabled": false,
+  "workbench.activityBar.location": "top",
+  "window.menuBarVisibility": "compact",
+  "breadcrumbs.enabled": false,
+  "editor.glyphMargin": false,
+  "editor.folding": false,
+  "workbench.statusBar.visible": true,
+  "workbench.tips.enabled": false
+}
+SETTINGS
 fi
 
 # Update password in config if PASSWORD env is set
