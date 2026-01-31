@@ -1,0 +1,24 @@
+# Docker Compose for local testing of code-server + openclaw
+# Usage: docker compose -f docker-compose.codeserver.yml up --build
+
+services:
+  openclaw-codeserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.codeserver
+      args:
+        OPENCLAW_GIT_REF: main
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - PASSWORD=changeme
+      - CS_AUTH=password
+      - OPENCLAW_STATE_DIR=/data/.openclaw
+      - OPENCLAW_WORKSPACE_DIR=/data/workspace
+    volumes:
+      - openclaw-data:/data
+    restart: unless-stopped
+
+volumes:
+  openclaw-data:

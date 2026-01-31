@@ -1,0 +1,174 @@
+# Dockerfile for code-server + openclaw
+# Provides a browser-based VS Code with openclaw pre-installed
+# Deploy on Railway with a volume mounted at /data for persistence
+
+# Stage 1: Build openclaw from source
+FROM node:22-bookworm AS openclaw-build
+
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    curl \
+    python3 \
+    make \
+    g++ \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install Bun (openclaw build uses it)
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+RUN corepack enable
+
+WORKDIR /openclaw
+
+# Pin to a known ref (tag/branch). If it doesn't exist, fall back to main.
+ARG OPENCLAW_GIT_REF=main
+RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/openclaw/openclaw.git .
+
+# Patch: relax version requirements for packages that may reference unpublished versions.
+RUN set -eux; \
+  find ./extensions -name 'package.json' -type f | while read -r f; do \
+    sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*">=[^"]+"/"openclaw": "*"/g' "$f"; \
+    sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*"workspace:[^"]+"/"openclaw": "*"/g' "$f"; \
+  done
+
+RUN pnpm install --no-frozen-lockfile
+RUN pnpm build
+ENV OPENCLAW_PREFER_PNPM=1
+RUN pnpm ui:install && pnpm ui:build
+
+
+# Stage 2: Runtime with code-server
+FROM codercom/code-server:latest
+
+USER root
+
+# Install dev tools and dependencies
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    build-essential \
+    gcc \
+    g++ \
+    make \
+    procps \
+    file \
+    git \
+    python3 \
+    python3-pip \
+    python3-venv \
+    pkg-config \
+    sudo \
+    vim \
+    nano \
+    htop \
+    jq \
+    wget \
+    unzip \
+    zip \
+    openssh-client \
+    rsync \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 22 (code-server base may have older version)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && apt-get install -y nodejs \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install Bun
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+# Enable corepack for pnpm
+RUN corepack enable
+
+# Install Homebrew (for additional tooling)
+RUN useradd -m -s /bin/bash linuxbrew || true \
+  && echo 'linuxbrew ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+
+USER linuxbrew
+RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
+
+USER root
+RUN chown -R root:root /home/linuxbrew/.linuxbrew 2>/dev/null || true
+ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+
+# Copy built openclaw from build stage
+COPY --from=openclaw-build /openclaw /openclaw
+
+# Create openclaw executable
+RUN printf '%s\n' '#!/usr/bin/env bash' 'exec node /openclaw/dist/entry.js "$@"' > /usr/local/bin/openclaw \
+  && chmod +x /usr/local/bin/openclaw
+
+# Create data directory for persistence
+RUN mkdir -p /data/.openclaw /data/workspace /data/.config \
+  && chmod -R 777 /data
+
+# Environment variables for openclaw
+ENV OPENCLAW_STATE_DIR=/data/.openclaw
+ENV OPENCLAW_WORKSPACE_DIR=/data/workspace
+
+# code-server configuration
+ENV PASSWORD=""
+ENV HASHED_PASSWORD=""
+ENV PORT=8080
+
+# Create entrypoint script
+RUN cat > /usr/local/bin/entrypoint.sh << 'EOF'
+#!/bin/bash
+set -e
+
+# Ensure data directories exist
+mkdir -p /data/.openclaw /data/workspace /data/.config/code-server
+
+# Link code-server config to persistent storage
+if [ ! -L /home/coder/.config ]; then
+  rm -rf /home/coder/.config
+  ln -sf /data/.config /home/coder/.config
+fi
+
+# Link workspace
+if [ ! -L /home/coder/workspace ]; then
+  rm -rf /home/coder/workspace
+  ln -sf /data/workspace /home/coder/workspace
+fi
+
+# Generate code-server config if not exists
+if [ ! -f /data/.config/code-server/config.yaml ]; then
+  mkdir -p /data/.config/code-server
+  cat > /data/.config/code-server/config.yaml << YAML
+bind-addr: 0.0.0.0:${PORT:-8080}
+auth: ${CS_AUTH:-password}
+password: ${PASSWORD:-changeme}
+cert: false
+YAML
+fi
+
+# Update password in config if PASSWORD env is set
+if [ -n "$PASSWORD" ]; then
+  sed -i "s/^password:.*/password: $PASSWORD/" /data/.config/code-server/config.yaml
+fi
+
+# Update auth method if CS_AUTH is set
+if [ -n "$CS_AUTH" ]; then
+  sed -i "s/^auth:.*/auth: $CS_AUTH/" /data/.config/code-server/config.yaml
+fi
+
+# Start code-server
+exec code-server --bind-addr "0.0.0.0:${PORT:-8080}" /data/workspace "$@"
+EOF
+
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Switch to coder user for runtime
+USER coder
+
+# Set working directory
+WORKDIR /data/workspace
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

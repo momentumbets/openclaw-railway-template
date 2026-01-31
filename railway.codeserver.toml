@@ -1,0 +1,19 @@
+# Railway configuration for code-server + openclaw
+# To use this config, rename to railway.toml or use Railway CLI:
+#   railway link --config railway.codeserver.toml
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.codeserver"
+
+[deploy]
+healthcheckPath = "/"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+
+[variables]
+PORT = "8080"
+# Set PASSWORD to protect code-server access
+# PASSWORD = "your-secure-password"
+# Set CS_AUTH to "none" to disable authentication (not recommended)
+# CS_AUTH = "password"
