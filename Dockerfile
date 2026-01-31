@@ -76,6 +76,6 @@ COPY openclawd-config "${OPENCLAW_STATE_DIR}/"
 RUN chown -R coder:coder "${OPENCLAW_STATE_DIR}"
 
 # Verify
-RUN gh --version && node -v && npm -v && turbo -V && railway -v && jq -V && rg --version && psql --version && openclaw --help
+RUN gh --version && node -v && npm -v && turbo --version && railway --version && jq --version && rg --version && psql --version && openclaw --help
 
 USER coder
