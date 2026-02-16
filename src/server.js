@@ -314,6 +314,7 @@ function isConfigured() {
 
 let gatewayProc = null;
 let gatewayStarting = null;
+let gatewayHealthy = false;  // Track if gateway responded to health check
 
 // Debug breadcrumbs for common Railway failures (502 / "Application failed to respond").
 let lastGatewayError = null;
@@ -326,7 +327,7 @@ function sleep(ms) {
 }
 
 async function waitForGatewayReady(opts = {}) {
-  const timeoutMs = opts.timeoutMs ?? 20_000;
+  const timeoutMs = opts.timeoutMs ?? 60_000;  // Increased from 20s to 60s for Railway startup
   const start = Date.now();
   const endpoints = ["/openclaw", "/openclaw", "/", "/health"];
   
@@ -336,7 +337,9 @@ async function waitForGatewayReady(opts = {}) {
         const res = await fetch(`${GATEWAY_TARGET}${endpoint}`, { method: "GET" });
         // Any HTTP response means the port is open.
         if (res) {
-          console.log(`[gateway] ready at ${endpoint}`);
+          const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+          console.log(`[gateway] ready at ${endpoint} (${elapsed}s elapsed)`);
+          gatewayHealthy = true;
           return true;
         }
       } catch (err) {
@@ -345,7 +348,9 @@ async function waitForGatewayReady(opts = {}) {
     }
     await sleep(250);
   }
-  console.error(`[gateway] failed to become ready after ${timeoutMs}ms`);
+  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+  console.warn(`[gateway] initial readiness check timed out after ${elapsed}s, but gateway may still be starting...`);
+  console.warn(`[gateway] continuing health monitoring in background`);
   return false;
 }
 
@@ -440,7 +445,46 @@ async function startGateway() {
     console.error(msg);
     lastGatewayExit = { code, signal, at: new Date().toISOString() };
     gatewayProc = null;
+    gatewayHealthy = false;
   });
+  
+  // Start background health monitoring
+  startBackgroundHealthMonitor();
+}
+
+// Background health monitor - continues checking if gateway becomes healthy after timeout
+let healthMonitorInterval = null;
+function startBackgroundHealthMonitor() {
+  // Clear any existing monitor
+  if (healthMonitorInterval) {
+    clearInterval(healthMonitorInterval);
+  }
+  
+  // Check gateway health every 10 seconds
+  healthMonitorInterval = setInterval(async () => {
+    // Only monitor if gateway process exists but hasn't responded yet
+    if (gatewayProc && !gatewayHealthy) {
+      try {
+        const res = await fetch(`${GATEWAY_TARGET}/health`, { 
+          method: "GET",
+          signal: AbortSignal.timeout(5000)
+        });
+        if (res) {
+          console.log(`[gateway] background health check: gateway is NOW HEALTHY`);
+          gatewayHealthy = true;
+          clearInterval(healthMonitorInterval);
+          healthMonitorInterval = null;
+        }
+      } catch (err) {
+        // Still not ready, will check again in 10s
+      }
+    } else if (!gatewayProc && healthMonitorInterval) {
+      // Gateway stopped, clear monitor
+      clearInterval(healthMonitorInterval);
+      healthMonitorInterval = null;
+      gatewayHealthy = false;
+    }
+  }, 10_000);
 }
 
 async function runDoctorBestEffort() {
@@ -465,10 +509,12 @@ async function ensureGatewayRunning() {
     gatewayStarting = (async () => {
       try {
         lastGatewayError = null;
+        gatewayHealthy = false;
         await startGateway();
-        const ready = await waitForGatewayReady({ timeoutMs: 20_000 });
+        const ready = await waitForGatewayReady({ timeoutMs: 60_000 });
         if (!ready) {
-          throw new Error("Gateway did not become ready in time");
+          console.warn(`[gateway] Initial readiness check timed out, but background monitor will continue checking`);
+          // Don't throw error - background monitor will detect when ready
         }
       } catch (err) {
         const msg = `[gateway] start failure: ${String(err)}`;
@@ -619,6 +665,8 @@ app.get("/healthz", async (_req, res) => {
     gateway: {
       target: GATEWAY_TARGET,
       reachable: gatewayReachable,
+      healthy: gatewayHealthy,
+      processRunning: !!gatewayProc,
       lastError: lastGatewayError,
       lastExit: lastGatewayExit,
       lastDoctorAt,
